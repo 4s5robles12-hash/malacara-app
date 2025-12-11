@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from fpdf import FPDF
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 
 # --- CONFIGURACIÓN DE PÁGINA ---
@@ -74,24 +74,30 @@ NIVELES_ESQUI = [
 ]
 
 EDADES_ALUMNOS = ["5-8 años", "9-12 años", "Adulto (>13 años)"]
-
-# HORARIOS
 HORARIOS_COLECTIVAS = ["10:00 - 13:00", "13:00 - 16:00"]
 HORARIOS_PARTICULARES = [f"{h}:00" for h in range(9, 18)]
 
 # --- FUNCIONES AUXILIARES ---
-def calcular_precio_bloque(tipo, alumnos, duracion):
+def get_date_range(start, end):
+    return [start + timedelta(days=x) for x in range((end - start).days + 1)]
+
+def calcular_precio_bloque(tipo, alumnos, dias_seleccionados, horas_particular_dia=0):
     num_personas = len(alumnos)
-    if num_personas == 0: return 0, 0
+    num_dias = len(dias_seleccionados)
+    
+    if num_personas == 0 or num_dias == 0: return 0, 0
     
     if tipo == "Colectiva (3h/día)":
         precio_unitario = 55
-        total = precio_unitario * num_personas * duracion
+        # Precio = 55 * Pax * Días
+        total = precio_unitario * num_personas * num_dias
         return total, precio_unitario
     else: # Particular
-        # Precio hora base + extra
+        # Precio Hora = Base + Extras
         precio_hora = 50 + (max(0, num_personas - 1) * 5)
-        total = precio_hora * duracion
+        # Total Horas = Horas/Día * Nº Días
+        total_horas = horas_particular_dia * num_dias
+        total = precio_hora * total_horas
         return total, precio_hora
 
 def calcular_precio_alquiler(gama, equipo, dias):
@@ -106,11 +112,9 @@ def calcular_precio_alquiler(gama, equipo, dias):
 # --- CLASE PDF ---
 class PDF(FPDF):
     def header(self):
-        # LOGO: Si existe el archivo 'logo.png' lo pone
         if os.path.exists("logo.png"):
-            # Ajustamos tamaño (ancho 50) y posición.
             self.image('logo.png', 10, 8, 50)
-            self.ln(25) # Espacio vertical para que el texto no pise el logo
+            self.ln(25)
         else:
             self.set_font('Arial', 'B', 24)
             self.set_text_color(220, 50, 50) 
@@ -128,54 +132,77 @@ class PDF(FPDF):
 # --- INTERFAZ STREAMLIT ---
 st.title("⛷️ Presupuestador Malacara Pro")
 
-# --- GENERAR ID UNICO AUTOMÁTICO ---
-# Formato: MAL-AAAAMMDD-HHMM (Ej: MAL-20251210-1030)
 id_presupuesto = "MAL-" + datetime.now().strftime("%Y%m%d-%H%M")
 fecha_solicitud = datetime.now().strftime("%d/%m/%Y")
 
-# 1. DATOS DEL CLIENTE
+# 1. DATOS DEL CLIENTE Y FECHAS GLOBALES
 with st.container():
-    st.markdown("### 1. Detalles del Cliente")
+    st.markdown("### 1. Detalles del Cliente y Viaje")
     col1, col2 = st.columns(2)
     cliente_nombre = col1.text_input("Nombre del Titular", "Iván Fernández")
-    cliente_dni = col2.text_input("DNI / Pasaporte") # DNI
-    
+    cliente_dni = col2.text_input("DNI / Pasaporte")
     col3, col4 = st.columns(2)
     cliente_telefono = col3.text_input("Teléfono")
     cliente_email = col4.text_input("Email")
     
-    cliente_fechas = st.text_input("Fechas del Viaje", "22/12 - 24/12")
+    st.divider()
+    st.markdown("#### 📅 Fechas del Viaje (Llegada - Salida)")
+    cd1, cd2 = st.columns(2)
+    f_inicio = cd1.date_input("Fecha Llegada", datetime.now())
+    f_fin = cd2.date_input("Fecha Salida", datetime.now() + timedelta(days=4))
     
-    # Mostramos el ID generado
-    st.info(f"🆔 Referencia automática: **{id_presupuesto}**")
+    lista_fechas_global = []
+    if f_fin >= f_inicio:
+        lista_fechas_global = get_date_range(f_inicio, f_fin)
+    else:
+        st.error("Fecha de salida debe ser posterior.")
 
-# 2. GESTIÓN DE CLASES (Carrito)
+    st.caption(f"🆔 Ref: **{id_presupuesto}**")
+
+# 2. GESTIÓN DE CLASES (POR GRUPOS)
 st.divider()
 st.markdown("### 2. Clases de Esquí / Snowboard")
 
-# Inicializar estados
 if 'carrito_clases' not in st.session_state:
     st.session_state['carrito_clases'] = []
     
-# --- CONFIGURADOR DE NUEVO GRUPO ---
 with st.container():
     st.markdown("#### 🛠️ Configurar Nuevo Grupo de Clase")
     
+    # 1. Configuración Básica
     c_conf1, c_conf2 = st.columns(2)
     new_estacion = c_conf1.selectbox("Estación", ["Astún", "Candanchú"], key="new_est")
     new_tipo = c_conf2.selectbox("Tipo de Clase", ["Colectiva (3h/día)", "Particular"], key="new_tipo")
-    
-    c_conf3, c_conf4 = st.columns(2)
-    if new_tipo == "Colectiva (3h/día)":
-        new_duracion = c_conf3.number_input("Días", 1, 5, 3, key="new_dur")
-        new_horario = c_conf4.selectbox("Horario Turno", HORARIOS_COLECTIVAS, key="new_hor")
-        lbl_dur = "días"
-    else:
-        new_duracion = c_conf3.number_input("Horas Totales", 1, 20, 2, key="new_dur")
-        new_horario = c_conf4.selectbox("Hora Inicio", HORARIOS_PARTICULARES, key="new_hor")
-        lbl_dur = "horas"
 
-    # Alumnos provisionales
+    # 2. Selección de Días y Horarios para ESTE grupo
+    c_fechas, c_horas = st.columns(2)
+    
+    if len(lista_fechas_global) > 0:
+        dias_grupo = c_fechas.multiselect(
+            "Selecciona los días de clase:", 
+            lista_fechas_global, 
+            default=lista_fechas_global,
+            format_func=lambda x: x.strftime("%d/%m")
+        )
+    else:
+        dias_grupo = []
+        c_fechas.warning("Define fechas de viaje arriba.")
+        
+    horas_particular = 0
+    
+    if new_tipo == "Colectiva (3h/día)":
+        new_horario = c_horas.selectbox("Horario Turno", HORARIOS_COLECTIVAS, key="new_hor")
+        lbl_dur = "días"
+        st.caption(f"Duración: {len(dias_grupo)} días seleccionados")
+    else:
+        # Particular
+        horas_particular = c_horas.number_input("Horas por día", 1, 6, 2, key="horas_dia_part")
+        new_horario = c_horas.selectbox("Hora Inicio", HORARIOS_PARTICULARES, key="new_hor")
+        lbl_dur = "horas totales"
+        total_h_calc = horas_particular * len(dias_grupo)
+        st.caption(f"Total: {len(dias_grupo)} días x {horas_particular}h = {total_h_calc} horas")
+
+    # 3. Alumnos
     if 'temp_alumnos' not in st.session_state:
         st.session_state['temp_alumnos'] = []
         
@@ -198,26 +225,41 @@ with st.container():
             else:
                 st.error("Falta el nombre")
 
-    # Mostrar alumnos provisionales
+    # 4. Confirmar Grupo
     if len(st.session_state['temp_alumnos']) > 0:
-        st.caption("Alumnos listos para añadir a este grupo:")
         st.table(pd.DataFrame(st.session_state['temp_alumnos']))
         
-        if st.button("✅ Confirmar y Añadir Grupo", type="primary"):
-            precio_bloque, precio_unit = calcular_precio_bloque(new_tipo, st.session_state['temp_alumnos'], new_duracion)
-            
-            st.session_state['carrito_clases'].append({
-                "estacion": new_estacion,
-                "tipo": new_tipo,
-                "duracion": new_duracion,
-                "lbl_dur": lbl_dur,
-                "horario": new_horario,
-                "alumnos": st.session_state['temp_alumnos'],
-                "precio_total": precio_bloque,
-                "precio_unit": precio_unit
-            })
-            st.session_state['temp_alumnos'] = []
-            st.rerun()
+        if len(dias_grupo) == 0:
+            st.error("⚠️ Debes seleccionar al menos un día de clase.")
+        else:
+            if st.button("✅ Confirmar y Añadir Grupo", type="primary"):
+                precio_bloque, precio_unit = calcular_precio_bloque(
+                    new_tipo, 
+                    st.session_state['temp_alumnos'], 
+                    dias_grupo, 
+                    horas_particular
+                )
+                
+                # Texto fechas para mostrar
+                txt_fechas = ", ".join([d.strftime("%d/%m") for d in dias_grupo])
+                
+                # Datos extra para display
+                duracion_display = len(dias_grupo) if new_tipo == "Colectiva (3h/día)" else (horas_particular * len(dias_grupo))
+                
+                st.session_state['carrito_clases'].append({
+                    "estacion": new_estacion,
+                    "tipo": new_tipo,
+                    "fechas_str": txt_fechas,
+                    "dias_obj": dias_grupo,
+                    "duracion_display": duracion_display,
+                    "lbl_dur": lbl_dur,
+                    "horario": new_horario,
+                    "alumnos": st.session_state['temp_alumnos'],
+                    "precio_total": precio_bloque,
+                    "precio_unit": precio_unit
+                })
+                st.session_state['temp_alumnos'] = []
+                st.rerun()
             
         if st.button("Cancelar Lista"):
             st.session_state['temp_alumnos'] = []
@@ -225,14 +267,15 @@ with st.container():
 
 # --- RESUMEN CLASES ---
 st.divider()
-st.subheader("📦 Resumen de Clases Añadidas")
+st.subheader("📦 Resumen de Clases")
 total_clases_global = 0
 
 if len(st.session_state['carrito_clases']) > 0:
     for idx, grupo in enumerate(st.session_state['carrito_clases']):
         with st.container():
             st.markdown(f"**Grupo {idx+1}: {grupo['tipo']} en {grupo['estacion']}**")
-            st.markdown(f"🗓️ {grupo['duracion']} {grupo['lbl_dur']} | ⏰ {grupo['horario']} | 💶 **Subtotal: {grupo['precio_total']}€**")
+            st.markdown(f"🗓️ **Días:** {grupo['fechas_str']} | ⏰ {grupo['horario']} | ⏳ {grupo['duracion_display']} {grupo['lbl_dur']}")
+            st.markdown(f"💶 **Subtotal: {grupo['precio_total']}€**")
             
             df_g = pd.DataFrame(grupo['alumnos'])
             st.dataframe(df_g[["nombre", "edad", "nivel"]], use_container_width=True, hide_index=True)
@@ -255,29 +298,52 @@ if 'alquileres' not in st.session_state:
     st.session_state['alquileres'] = []
 
 with st.expander("Añadir Equipo de Alquiler"):
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2 = st.columns(2)
     cat_select = c1.selectbox("Gama", list(PRECIOS_ALQUILER.keys()))
     equip_options = list(PRECIOS_ALQUILER[cat_select].keys())
     equip_select = c2.selectbox("Equipo", equip_options)
-    dias_alq = c3.slider("Días Alquiler", 1, 5, 3)
+    
+    # Selector de días específico para alquiler
+    if len(lista_fechas_global) > 0:
+        dias_alq_sel = st.multiselect(
+            "Días de Alquiler", 
+            lista_fechas_global, 
+            default=lista_fechas_global, 
+            key="dias_alq_sel",
+            format_func=lambda x: x.strftime("%d/%m")
+        )
+        num_dias_alq = len(dias_alq_sel)
+    else:
+        num_dias_alq = 0
+        dias_alq_sel = []
+
+    c3, c4 = st.columns(2)
+    st.caption(f"Total días alquiler: {num_dias_alq}")
     cant_equip = c4.number_input("Cantidad", 1, 10, 1)
     
     if st.button("Añadir Equipo"):
-        precio_unit = calcular_precio_alquiler(cat_select, equip_select, dias_alq)
-        subtotal_linea = precio_unit * cant_equip
-        st.session_state['alquileres'].append({
-            "gama": cat_select,
-            "tipo": equip_select,
-            "dias": dias_alq,
-            "cantidad": cant_equip,
-            "precio_unit": precio_unit,
-            "subtotal": subtotal_linea
-        })
+        if num_dias_alq > 0:
+            precio_unit = calcular_precio_alquiler(cat_select, equip_select, num_dias_alq)
+            subtotal_linea = precio_unit * cant_equip
+            fechas_alq_str = ", ".join([d.strftime("%d/%m") for d in dias_alq_sel])
+            
+            st.session_state['alquileres'].append({
+                "gama": cat_select,
+                "tipo": equip_select,
+                "fechas": fechas_alq_str,
+                "dias": num_dias_alq,
+                "cantidad": cant_equip,
+                "precio_unit": precio_unit,
+                "subtotal": subtotal_linea
+            })
+        else:
+            st.error("Selecciona días.")
 
 total_alquiler = 0
 if len(st.session_state['alquileres']) > 0:
+    # Mostramos fechas en la tabla
     df_alq = pd.DataFrame(st.session_state['alquileres'])
-    st.dataframe(df_alq[["gama", "tipo", "dias", "cantidad", "subtotal"]], use_container_width=True)
+    st.dataframe(df_alq[["gama", "tipo", "fechas", "cantidad", "subtotal"]], use_container_width=True)
     total_alquiler = df_alq["subtotal"].sum()
     if st.button("Borrar Alquileres"):
         st.session_state['alquileres'] = []
@@ -285,7 +351,7 @@ if len(st.session_state['alquileres']) > 0:
 
 st.write(f"**Subtotal Alquiler: {total_alquiler}€**")
 
-# 4. DESCUENTOS Y TOTALES
+# 4. TOTALES
 st.divider()
 st.markdown("### 4. Resumen Final")
 
@@ -308,19 +374,16 @@ total_final = subtotal_general - descuento_total
 
 st.metric(label="TOTAL A PAGAR", value=f"{total_final:.2f}€", delta=f"-{descuento_total:.2f}€" if descuento_total > 0 else None)
 
-# 5. GENERAR PDF
+# 5. PDF
 def create_pdf():
     pdf = PDF()
     pdf.add_page()
-    
     blue_header = (230, 240, 255)
     
-    # ID y Fecha
     pdf.set_font("Arial", '', 10)
     pdf.cell(0, 5, f"Fecha: {fecha_solicitud} | Ref: {id_presupuesto}", 0, 1, 'R')
     pdf.ln(5)
     
-    # Texto intro
     pdf.multi_cell(0, 5, "Gracias por contactar con Malacara Esquí y Snowboard. A continuación, encontrará su presupuesto detallado.")
     pdf.ln(5)
     
@@ -335,7 +398,7 @@ def create_pdf():
     pdf.set_font("Arial", '', 10)
     pdf.cell(60, 6, cliente_nombre, 0, 0)
     pdf.set_font("Arial", 'B', 10)
-    pdf.cell(30, 6, "DNI/Pasaporte:", 0, 0) # DNI
+    pdf.cell(30, 6, "DNI/Pass:", 0, 0)
     pdf.set_font("Arial", '', 10)
     pdf.cell(60, 6, cliente_dni, 0, 1)
     
@@ -348,26 +411,26 @@ def create_pdf():
     pdf.set_font("Arial", '', 10)
     pdf.cell(60, 6, cliente_email, 0, 1)
     
-    pdf.set_font("Arial", 'B', 10)
-    pdf.cell(30, 6, "Fechas:", 0, 0)
-    pdf.set_font("Arial", '', 10)
-    pdf.cell(60, 6, cliente_fechas, 0, 1)
     pdf.ln(5)
     
-    # BLOQUE CLASES (Iterar por grupos)
+    # BLOQUE CLASES
     if len(st.session_state['carrito_clases']) > 0:
         pdf.set_font("Arial", 'B', 12)
         pdf.cell(0, 8, "Presupuesto de Clases", 0, 1, 'L', fill=True)
         pdf.ln(2)
         
         for i, grupo in enumerate(st.session_state['carrito_clases']):
-            # Sub-cabecera del grupo
             pdf.set_font("Arial", 'B', 10)
             pdf.set_fill_color(245, 245, 245)
+            # Título del grupo
             titulo_grupo = f"Grupo {i+1}: {grupo['tipo']} - {grupo['estacion']} ({grupo['horario']})"
             pdf.cell(0, 7, titulo_grupo, 0, 1, 'L', fill=True)
             
-            # Tabla Alumnos del grupo
+            # Fechas específicas
+            pdf.set_font("Arial", 'I', 9)
+            pdf.cell(0, 6, f"Fechas: {grupo['fechas_str']}", 0, 1)
+            
+            # Alumnos
             pdf.set_font("Arial", 'B', 9)
             pdf.set_text_color(0, 51, 102)
             pdf.cell(60, 6, "Alumno", 1, 0)
@@ -384,9 +447,8 @@ def create_pdf():
                 nivel_corto = (al['nivel'][:35] + '..') if len(al['nivel']) > 35 else al['nivel']
                 pdf.cell(70, 6, nivel_corto, 1, 1)
             
-            # Pie del grupo con precio
             pdf.set_font("Arial", 'B', 9)
-            pdf.cell(160, 6, f"Detalle: {len(grupo['alumnos'])} pax x {grupo['duracion']} {grupo['lbl_dur']} | Subtotal Grupo:", 0, 0, 'R')
+            pdf.cell(160, 6, f"Subtotal Grupo ({grupo['duracion_display']} {grupo['lbl_dur']}):", 0, 0, 'R')
             pdf.cell(30, 6, f"{grupo['precio_total']} eur", 0, 1, 'R')
             pdf.ln(3)
 
@@ -395,3 +457,75 @@ def create_pdf():
     # BLOQUE ALQUILER
     if len(st.session_state['alquileres']) > 0:
         pdf.set_font("Arial", 'B', 12)
+        pdf.set_text_color(0)
+        pdf.set_fill_color(*blue_header)
+        pdf.cell(0, 8, "Presupuesto de Alquiler", 0, 1, 'L', fill=True)
+        
+        pdf.set_font("Arial", 'B', 9)
+        pdf.set_text_color(0, 51, 102)
+        pdf.cell(50, 8, "Equipo", 1, 0, 'C')
+        pdf.cell(50, 8, "Fechas", 1, 0, 'C')
+        pdf.cell(20, 8, "Precio", 1, 0, 'C')
+        pdf.cell(20, 8, "Cant.", 1, 0, 'C')
+        pdf.cell(20, 8, "Total", 1, 1, 'C')
+        
+        pdf.set_text_color(0)
+        pdf.set_font("Arial", '', 8)
+        
+        for item in st.session_state['alquileres']:
+            desc_item = f"{item['gama']} - {item['tipo']}"
+            pdf.cell(50, 8, desc_item[:25], 1, 0)
+            pdf.cell(50, 8, item['fechas'][:30], 1, 0, 'C') # Recortar si es muy largo
+            pdf.cell(20, 8, f"{item['precio_unit']}", 1, 0, 'C')
+            pdf.cell(20, 8, str(item['cantidad']), 1, 0, 'C')
+            pdf.cell(20, 8, f"{item['subtotal']}", 1, 1, 'C')
+        
+        pdf.ln(2)
+        pdf.set_font("Arial", 'B', 10)
+        pdf.cell(160, 8, "Total Alquiler:", 0, 0, 'R')
+        pdf.cell(30, 8, f"{total_alquiler:.2f} eur", 0, 1, 'R')
+        pdf.ln(5)
+
+    # RESUMEN FINAL
+    pdf.set_fill_color(240, 240, 240)
+    pdf.set_font("Arial", 'B', 14)
+    pdf.cell(0, 10, "", 0, 1, fill=True)
+    pdf.set_y(pdf.get_y() - 10)
+    
+    texto_total = f"TOTAL PRESUPUESTO: {total_final:.2f} eur"
+    pdf.cell(0, 10, texto_total, 0, 1, 'R')
+    
+    if descuento_total > 0:
+        pdf.set_font("Arial", 'I', 10)
+        pdf.set_text_color(200, 0, 0)
+        pdf.cell(0, 6, f"Incluye descuento de {descuento_total:.2f} eur ({concepto_desc})", 0, 1, 'R')
+        pdf.set_text_color(0)
+    
+    pdf.ln(5)
+    
+    # CONDICIONES
+    pdf.set_font("Arial", 'B', 11)
+    pdf.set_text_color(0)
+    pdf.cell(0, 8, "Condiciones", 0, 1, 'L')
+    pdf.set_font("Arial", '', 9)
+    condiciones = (
+        "- Este presupuesto tiene una validez de 15 días.\n"
+        "- Para confirmar la reserva, contacte con nosotros.\n"
+        "- Cancelaciones con menos de 48 horas conllevan cargo.\n"
+        "- Los precios están sujetos a cambios según la temporada."
+    )
+    pdf.multi_cell(0, 5, condiciones)
+    
+    return pdf.output(dest='S').encode('latin-1')
+
+st.divider()
+if st.button("📄 CREAR PDF FINAL", type="primary"):
+    pdf_bytes = create_pdf()
+    nombre_archivo = f"Presupuesto_{id_presupuesto}_{cliente_nombre.split()[0]}.pdf"
+    
+    st.download_button(
+        label="⬇️ Descargar PDF",
+        data=pdf_bytes,
+        file_name=nombre_archivo,
+        mime='application/pdf'
+    )
